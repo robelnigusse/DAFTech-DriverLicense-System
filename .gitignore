@@ -1,0 +1,141 @@
+
+# ==========================================
+# .NET / ASP.NET Core
+# ==========================================
+
+# Build outputs
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa]rtifacts/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# Rider / JetBrains
+.idea/
+*.sln.iml
+
+# VS Code
+.vscode/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/packages/
+
+# Test results and coverage
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+
+# ASP.NET Core local configuration
+appsettings.Development.local.json
+appsettings.*.local.json
+secrets.json
+
+# ==========================================
+# FLUTTER / DART
+# ==========================================
+
+# Dart and Flutter generated files
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Generated plugin registrants and localization
+# Keep generated files tracked if your project requires them.
+# *.g.dart
+# *.freezed.dart
+
+# Flutter version management
+.fvm/flutter_sdk
+
+# Android build outputs
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/key.properties
+
+# Android signing files
+*.jks
+*.keystore
+
+# iOS build outputs
+ios/Flutter/.last_build_id
+ios/Flutter/ephemeral/
+ios/Pods/
+ios/.symlinks/
+ios/build/
+ios/Runner/GeneratedPluginRegistrant.*
+
+# macOS build outputs
+macos/Flutter/ephemeral/
+macos/Pods/
+macos/build/
+
+# Linux build outputs
+linux/flutter/ephemeral/
+linux/build/
+
+# Windows build outputs
+windows/flutter/ephemeral/
+windows/build/
+
+# ==========================================
+# ENVIRONMENT VARIABLES AND SECRETS
+# ==========================================
+
+.env
+.env.*
+!.env.example
+
+# Certificates and private keys
+*.pem
+*.p12
+*.pfx
+*.key
+
+# ==========================================
+# OPERATING SYSTEM FILES
+# ==========================================
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+# ==========================================
+# LOGS AND TEMPORARY FILES
+# ==========================================
+
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
