@@ -1,7 +1,9 @@
 import 'dart:io';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
 import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart';
 import 'package:image/image.dart' as img;
@@ -45,6 +47,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
   bool _scanning = false;
   bool _isScanningBack =
       false; // false = Step 1 (Front OCR), true = Step 2 (Back QR)
+  bool _isProcessingFrame = false; // Prevents overlapping live-stream QR checks
   String? _error;
   Map<String, String>? _fields;
 
@@ -81,6 +84,9 @@ class _ScannerScreenState extends State<ScannerScreen> {
         camera,
         ResolutionPreset.max, // Kept exactly as your working code
         enableAudio: false,
+        imageFormatGroup: Platform.isAndroid
+            ? ImageFormatGroup.nv21
+            : ImageFormatGroup.bgra8888,
       );
 
       await controller.initialize();
@@ -142,7 +148,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
       if (!mounted) return;
 
-      // Populate your 5 fields + OCR raw text
+      // Populate your 5 fields + OCR raw text from front scan
       for (final entry in result.entries) {
         _inputs[entry.key]!.text = entry.value;
       }
@@ -155,11 +161,13 @@ class _ScannerScreenState extends State<ScannerScreen> {
         return;
       }
 
-      // Move to Step 2 (Back of License for QR)
+      // Move to Step 2 and start live automatic QR detection
       setState(() {
         _isScanningBack = true;
       });
-      _showMessage('Front scanned! Now flip the licence to scan the QR code.');
+      _showMessage(
+          'Front scanned! Flip the licence — QR will scan automatically.');
+      await _startAutoQrScan();
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = 'Scanning failed: $e');
@@ -177,8 +185,122 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
   }
 
-  /// STEP 2: Scan Back of License for QR Raw Data
-  Future<void> _scanBackQr() async {
+  /// Starts the live camera stream on Step 2 to auto-detect the QR code
+  Future<void> _startAutoQrScan() async {
+    final camera = _camera;
+    if (camera == null ||
+        !camera.value.isInitialized ||
+        camera.value.isStreamingImages) {
+      return;
+    }
+
+    try {
+      await camera.setFocusMode(FocusMode.auto);
+      await camera.startImageStream((CameraImage image) async {
+        if (_isProcessingFrame || !_isScanningBack || _scanning) return;
+        _isProcessingFrame = true;
+
+        try {
+          final inputImage = _inputImageFromCameraImage(image);
+          if (inputImage == null) return;
+
+          final barcodes = await _barcodeScanner.processImage(inputImage);
+          if (barcodes.isNotEmpty) {
+            final qrRaw = barcodes
+                .map((b) => b.rawValue ?? b.displayValue ?? '')
+                .where((v) => v.isNotEmpty)
+                .join('\n')
+                .trim();
+
+            if (qrRaw.isNotEmpty) {
+              // Stop the stream immediately once a valid QR code is found
+              await _stopAutoQrScan();
+
+              if (!mounted) return;
+
+              debugPrint('========== AUTO RAW QR DATA ==========');
+              debugPrint(qrRaw);
+              debugPrint('========== END AUTO QR DATA ==========');
+
+              HapticFeedback.mediumImpact();
+              _inputs['QR raw data']!.text = qrRaw;
+
+              // Overwrite Full Name, License ID, and License Type with accurate QR data
+              _applyQrDataToFields(qrRaw);
+
+              setState(() {
+                _fields = {
+                  for (final entry in _inputs.entries)
+                    entry.key: entry.value.text,
+                };
+              });
+            }
+          }
+        } catch (e) {
+          debugPrint('Live QR frame error: $e');
+        } finally {
+          await Future.delayed(const Duration(milliseconds: 150));
+          _isProcessingFrame = false;
+        }
+      });
+    } catch (e) {
+      debugPrint('Could not start QR stream: $e');
+    }
+  }
+
+  /// Safely stops the live camera stream
+  Future<void> _stopAutoQrScan() async {
+    final camera = _camera;
+    if (camera != null && camera.value.isStreamingImages) {
+      try {
+        await camera.stopImageStream();
+      } catch (_) {}
+    }
+    _isProcessingFrame = false;
+  }
+
+  /// Converts a live CameraImage frame into an ML Kit InputImage
+  InputImage? _inputImageFromCameraImage(CameraImage image) {
+    final camera = _camera;
+    if (camera == null) return null;
+
+    final sensorOrientation = camera.description.sensorOrientation;
+    final rotation = InputImageRotationValue.fromRawValue(sensorOrientation) ??
+        InputImageRotation.rotation90deg;
+
+    final format = InputImageFormatValue.fromRawValue(image.format.raw);
+
+    if (format != null && image.planes.length == 1) {
+      return InputImage.fromBytes(
+        bytes: image.planes.first.bytes,
+        metadata: InputImageMetadata(
+          size: Size(image.width.toDouble(), image.height.toDouble()),
+          rotation: rotation,
+          format: format,
+          bytesPerRow: image.planes.first.bytesPerRow,
+        ),
+      );
+    }
+
+    final allBytes = WriteBuffer();
+    for (final plane in image.planes) {
+      allBytes.putUint8List(plane.bytes);
+    }
+    final bytes = allBytes.done().buffer.asUint8List();
+
+    return InputImage.fromBytes(
+      bytes: bytes,
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: InputImageFormat.nv21,
+        bytesPerRow: image.planes.first.bytesPerRow,
+      ),
+    );
+  }
+
+  /// Manual fallback button on Step 2: Takes a high-res photo if user taps the button
+  Future<void> _scanBackQrManual() async {
     final camera = _camera;
     if (camera == null || !camera.value.isInitialized || _scanning) return;
 
@@ -191,19 +313,19 @@ class _ScannerScreenState extends State<ScannerScreen> {
     File? croppedFile;
 
     try {
+      await _stopAutoQrScan();
+
       await camera.setFocusMode(FocusMode.locked);
       final photo = await camera.takePicture();
       await camera.setFocusMode(FocusMode.auto);
 
       rawFile = File(photo.path);
-
-      // First try scanning the cropped area inside the frame (prevents ResolutionPreset.max downsampling issues)
       croppedFile = await _cropOnly(photo.path);
+
       var barcodes = await _barcodeScanner.processImage(
         InputImage.fromFilePath(croppedFile.path),
       );
 
-      // Fallback to full image if not found in cropped area
       if (barcodes.isEmpty) {
         barcodes = await _barcodeScanner.processImage(
           InputImage.fromFilePath(photo.path),
@@ -214,8 +336,9 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
       if (barcodes.isEmpty) {
         _showMessage(
-          'No QR code detected. Keep the QR code inside the frame and steady, or tap Skip.',
+          'No QR code detected yet. Keep holding steady — auto-scan is active.',
         );
+        await _startAutoQrScan();
         return;
       }
 
@@ -225,13 +348,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
           .join('\n')
           .trim();
 
-      debugPrint('========== RAW QR DATA ==========');
-      debugPrint(qrRaw);
-      debugPrint('========== END QR DATA ==========');
-
       _inputs['QR raw data']!.text = qrRaw;
 
-      // Show the Review Results screen
+      // Overwrite Full Name, License ID, and License Type with accurate QR data
+      _applyQrDataToFields(qrRaw);
+
       setState(() {
         _fields = {
           for (final entry in _inputs.entries) entry.key: entry.value.text,
@@ -254,7 +375,59 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
   }
 
-  /// Your exact working _extractFields logic
+  /// Parses the Ethiopian Driver's License QR payload and OVERWRITES the fields:
+  /// Example: "የአሽከርካሪው ስም :-ናሆም ክፍሉየመንጃ ፍቃድ ቁጥር :-አዲስ አበባ-አውቶ-774944"
+  void _applyQrDataToFields(String qrRaw) {
+    // 1. Extract and overwrite Full Name from "የአሽከርካሪው ስም :-..."
+    final nameMatch = RegExp(
+      r'የአሽከርካሪው\s*ስም\s*[:：-]*(.+?)(?=የመንጃ\s*ፍቃድ\s*ቁጥር|$)',
+      dotAll: true,
+    ).firstMatch(qrRaw);
+
+    if (nameMatch != null) {
+      final qrName = _clean(nameMatch.group(1)!);
+      if (qrName.isNotEmpty) {
+        _inputs['Full name']!.text = qrName;
+      }
+    }
+
+    // 2. Extract and overwrite License Type & License ID from "የመንጃ ፍቃድ ቁጥር :-አዲስ አበባ-አውቶ-774944"
+    final licenseMatch = RegExp(
+      r'የመንጃ\s*ፍቃድ\s*ቁጥር\s*[:：-]*(.+)$',
+      dotAll: true,
+    ).firstMatch(qrRaw);
+
+    if (licenseMatch != null) {
+      final fullLicenseStr = licenseMatch.group(1)!.trim();
+      final parts = fullLicenseStr
+          .split('-')
+          .map((s) => _clean(s))
+          .where((s) => s.isNotEmpty)
+          .toList();
+
+      if (parts.length >= 3) {
+        // Format: <Region> - <License Type/Grade> - <License ID Number>
+        // Example: parts[0] = አዲስ አበባ, parts[1] = አውቶ, parts[2] = 774944
+        final qrGrade = parts[1];
+        final qrLicenseId = parts.sublist(2).join('-');
+
+        if (qrGrade.isNotEmpty) {
+          _inputs['License type (Gerad)']!.text = qrGrade;
+        }
+        if (qrLicenseId.isNotEmpty) {
+          _inputs['License ID number']!.text = qrLicenseId;
+        }
+      } else if (parts.length == 2) {
+        // Fallback if only Grade-ID is present
+        _inputs['License type (Gerad)']!.text = parts[0];
+        _inputs['License ID number']!.text = parts[1];
+      } else if (parts.length == 1 && parts.first.isNotEmpty) {
+        _inputs['License ID number']!.text = parts.first;
+      }
+    }
+  }
+
+  /// Your exact working _extractFields logic for Front OCR
   Map<String, String> _extractFields(String text) {
     final lines = text
         .split('\n')
@@ -371,7 +544,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
     return croppedFile;
   }
 
-  /// Crops to the frame for QR scanning so ML Kit gets a crisp image at ResolutionPreset.max
+  /// Crops to the frame for manual QR snapshot fallback
   Future<File> _cropOnly(String path) async {
     final bytes = await File(path).readAsBytes();
     final original = img.decodeImage(bytes);
@@ -398,7 +571,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
   String _clean(String value) {
     return value
-        // Remove leading/trailing pipes, colons, slashes, underscores, and symbols
         .replaceAll(RegExp(r'^[\s:./|_~-]+|[\s:./|_~-]+$'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
@@ -412,6 +584,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
   @override
   void dispose() {
+    _stopAutoQrScan();
     _camera?.dispose();
     _barcodeScanner.close();
     for (final controller in _inputs.values) {
@@ -430,7 +603,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
           _fields != null
               ? 'Review Extracted Info'
               : _isScanningBack
-                  ? 'Step 2: Scan Back (QR)'
+                  ? 'Step 2: Auto-Scanning QR...'
                   : 'Driving License Scanner',
         ),
       ),
@@ -447,7 +620,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
           padding: const EdgeInsets.all(16),
           child: Text(
             _isScanningBack
-                ? 'Flip the licence and place the QR code inside the frame.'
+                ? 'Point the camera at the QR code on the back — it will scan automatically.'
                 : 'Place the entire driving licence inside the frame.',
             textAlign: TextAlign.center,
           ),
@@ -544,7 +717,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
                           camera == null ||
                           _error != null
                       ? null
-                      : (_isScanningBack ? _scanBackQr : _scanLicense),
+                      : (_isScanningBack ? _scanBackQrManual : _scanLicense),
                   icon: Icon(
                     _isScanningBack
                         ? Icons.qr_code_scanner
@@ -553,7 +726,9 @@ class _ScannerScreenState extends State<ScannerScreen> {
                   label: Text(
                     _scanning
                         ? 'Scanning...'
-                        : (_isScanningBack ? 'Scan QR Code' : 'Scan licence'),
+                        : (_isScanningBack
+                            ? 'Auto-Scanning QR (Tap to Capture)'
+                            : 'Scan licence'),
                   ),
                 ),
               ),
@@ -562,7 +737,9 @@ class _ScannerScreenState extends State<ScannerScreen> {
                 TextButton(
                   onPressed: _scanning
                       ? null
-                      : () {
+                      : () async {
+                          await _stopAutoQrScan();
+                          if (!mounted) return;
                           setState(() {
                             _fields = {
                               for (final entry in _inputs.entries)
@@ -632,10 +809,12 @@ class _ScannerScreenState extends State<ScannerScreen> {
         ),
         const SizedBox(height: 12),
         OutlinedButton(
-          onPressed: () {
+          onPressed: () async {
+            await _stopAutoQrScan();
             for (final controller in _inputs.values) {
               controller.clear();
             }
+            if (!mounted) return;
             setState(() {
               _fields = null;
               _isScanningBack = false;
