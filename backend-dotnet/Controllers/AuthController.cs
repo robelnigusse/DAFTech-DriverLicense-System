@@ -24,6 +24,7 @@ public class AuthController : ControllerBase
     [HttpPost("login")]
     public async Task<IActionResult> Login(LoginRequestDto request)
     {
+        System.Console.WriteLine($"Login attempt for user: {request.Username}");
         var user = await _userManager.FindByNameAsync(request.Username);
 
         if (user is null)
@@ -55,3 +56,4 @@ public class AuthController : ControllerBase
         });
     }
 }
+// dotnet watch --urls "http://0.0.0.0:5000"

@@ -13,7 +13,9 @@ import 'package:mobile_flutter/main.dart';
 void main() {
   testWidgets('Counter increments smoke test', (WidgetTester tester) async {
     // Build our app and trigger a frame.
-    await tester.pumpWidget(const LicenseScannerApp());
+    await tester.pumpWidget(LicenseScannerApp(
+      initialLoggedIn: false,
+    ));
 
     // Verify that our counter starts at 0.
     expect(find.text('0'), findsOneWidget);
