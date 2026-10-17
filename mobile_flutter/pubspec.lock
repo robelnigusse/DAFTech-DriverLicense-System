@@ -241,7 +241,7 @@ packages:
     source: hosted
     version: "0.20.0"
   google_mlkit_barcode_scanning:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: google_mlkit_barcode_scanning
       sha256: b38505df2d3fdf7830979d60fee55039c2f442d189b2e06fcb2fe494ba65d0db
