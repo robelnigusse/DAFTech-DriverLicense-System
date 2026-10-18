@@ -8,36 +8,43 @@ import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
 import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart';
 import 'package:image/image.dart' as img;
 
+import '../models/driver.dart';
+import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../utils/camera_image_converter.dart';
+import '../utils/license_parser.dart';
+import '../widgets/status_chip.dart';
 import 'login_screen.dart';
 
-class ScannerScreen extends StatefulWidget {
-  const ScannerScreen({super.key});
+/// Scans a driving licence (OCR on the front, QR on the back), lets the
+/// officer review the extracted values, then registers it with the API.
+class LicenseScannerScreen extends StatefulWidget {
+  const LicenseScannerScreen({super.key});
 
   @override
-  State<ScannerScreen> createState() => _ScannerScreenState();
+  State<LicenseScannerScreen> createState() => _LicenseScannerScreenState();
 }
 
-class _ScannerScreenState extends State<ScannerScreen> {
+class _LicenseScannerScreenState extends State<LicenseScannerScreen> {
   CameraController? _camera;
   final BarcodeScanner _barcodeScanner = BarcodeScanner();
 
   bool _initializing = true;
   bool _scanning = false;
-  bool _isScanningBack = false;
+  bool _scanningBack = false;
+  bool _reviewing = false;
+  bool _submitting = false;
   bool _isProcessingFrame = false;
   String? _error;
-  Map<String, String>? _fields;
 
-  final Map<String, TextEditingController> _inputs = {
-    'License ID number': TextEditingController(),
-    'Full name': TextEditingController(),
-    'Date of birth': TextEditingController(),
-    'Expiry date': TextEditingController(),
-    'License type (Gerad)': TextEditingController(),
-    'QR raw data': TextEditingController(),
-    'OCR raw text': TextEditingController(),
-  };
+  final _licenseIdController = TextEditingController();
+  final _fullNameController = TextEditingController();
+  final _dobController = TextEditingController();
+  final _expiryController = TextEditingController();
+  final _licenseTypeController = TextEditingController();
+
+  String _qrRaw = '';
+  String _ocrRaw = '';
 
   @override
   void initState() {
@@ -88,39 +95,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
   }
 
-  Future<void> _handleLogout() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Logout'),
-        content: const Text('Are you sure you want to log out?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Logout'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm != true) return;
-
-    await _stopAutoQrScan();
-    await AuthService.logout();
-
-    if (!mounted) return;
-
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const LoginScreen()),
-    );
-  }
-
-  /// STEP 1: Front OCR scan
-  Future<void> _scanLicense() async {
+  /// Step 1: OCR the front of the card.
+  Future<void> _scanFront() async {
     final camera = _camera;
     if (camera == null || !camera.value.isInitialized || _scanning) return;
 
@@ -154,26 +130,27 @@ class _ScannerScreenState extends State<ScannerScreen> {
       debugPrint('========== END OCR TEXT ==========');
 
       final result = _extractFields(text);
+      _ocrRaw = text.trim();
 
       if (!mounted) return;
 
       for (final entry in result.entries) {
-        _inputs[entry.key]!.text = entry.value;
+        _controllerFor(entry.key)?.text = entry.value;
       }
-      _inputs['OCR raw text']!.text = text.trim();
 
       if (result.values.every((value) => value.isEmpty)) {
         _showMessage(
-          'No fields were detected. Try better lighting and keep the licence steady.',
+          'No fields were detected. Try better lighting and keep the '
+          'licence steady.',
         );
         return;
       }
 
-      setState(() {
-        _isScanningBack = true;
-      });
+      setState(() => _scanningBack = true);
       _showMessage(
-          'Front scanned! Flip the licence — QR will scan automatically.');
+        'Front scanned. Flip the licence — the QR code will be read '
+        'automatically.',
+      );
       await _startAutoQrScan();
     } catch (e) {
       if (!mounted) return;
@@ -192,7 +169,24 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
   }
 
-  /// Starts live camera stream on Step 2 to auto-detect the QR code
+  TextEditingController? _controllerFor(String label) {
+    switch (label) {
+      case 'License ID number':
+        return _licenseIdController;
+      case 'Full name':
+        return _fullNameController;
+      case 'Date of birth':
+        return _dobController;
+      case 'Expiry date':
+        return _expiryController;
+      case 'License type (Gerad)':
+        return _licenseTypeController;
+      default:
+        return null;
+    }
+  }
+
+  /// Step 2: automatically detect the QR code on the back.
   Future<void> _startAutoQrScan() async {
     final camera = _camera;
     if (camera == null ||
@@ -204,11 +198,12 @@ class _ScannerScreenState extends State<ScannerScreen> {
     try {
       await camera.setFocusMode(FocusMode.auto);
       await camera.startImageStream((CameraImage image) async {
-        if (_isProcessingFrame || !_isScanningBack || _scanning) return;
+        if (_isProcessingFrame || !_scanningBack || _scanning) return;
         _isProcessingFrame = true;
 
         try {
-          final inputImage = _inputImageFromCameraImage(image);
+          final inputImage =
+              CameraImageConverter.fromCameraImage(image, camera);
           if (inputImage == null) return;
 
           final barcodes = await _barcodeScanner.processImage(inputImage);
@@ -229,15 +224,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
               debugPrint('========== END AUTO QR DATA ==========');
 
               HapticFeedback.mediumImpact();
-              _inputs['QR raw data']!.text = qrRaw;
-
-              _applyQrDataToFields(qrRaw);
+              _applyQr(qrRaw);
 
               setState(() {
-                _fields = {
-                  for (final entry in _inputs.entries)
-                    entry.key: entry.value.text,
-                };
+                _reviewing = true;
+                _scanningBack = false;
               });
             }
           }
@@ -263,46 +254,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
     _isProcessingFrame = false;
   }
 
-  InputImage? _inputImageFromCameraImage(CameraImage image) {
-    final camera = _camera;
-    if (camera == null) return null;
-
-    final sensorOrientation = camera.description.sensorOrientation;
-    final rotation = InputImageRotationValue.fromRawValue(sensorOrientation) ??
-        InputImageRotation.rotation90deg;
-
-    final format = InputImageFormatValue.fromRawValue(image.format.raw);
-
-    if (format != null && image.planes.length == 1) {
-      return InputImage.fromBytes(
-        bytes: image.planes.first.bytes,
-        metadata: InputImageMetadata(
-          size: Size(image.width.toDouble(), image.height.toDouble()),
-          rotation: rotation,
-          format: format,
-          bytesPerRow: image.planes.first.bytesPerRow,
-        ),
-      );
-    }
-
-    final allBytes = WriteBuffer();
-    for (final plane in image.planes) {
-      allBytes.putUint8List(plane.bytes);
-    }
-    final bytes = allBytes.done().buffer.asUint8List();
-
-    return InputImage.fromBytes(
-      bytes: bytes,
-      metadata: InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
-        rotation: rotation,
-        format: InputImageFormat.nv21,
-        bytesPerRow: image.planes.first.bytesPerRow,
-      ),
-    );
-  }
-
-  Future<void> _scanBackQrManual() async {
+  /// Fallback capture for the QR when auto-detection is struggling.
+  Future<void> _captureQrManually() async {
     final camera = _camera;
     if (camera == null || !camera.value.isInitialized || _scanning) return;
 
@@ -338,7 +291,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
       if (barcodes.isEmpty) {
         _showMessage(
-          'No QR code detected yet. Keep holding steady — auto-scan is active.',
+          'No QR code detected yet. Keep holding steady — automatic '
+          'scanning is still active.',
         );
         await _startAutoQrScan();
         return;
@@ -350,13 +304,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
           .join('\n')
           .trim();
 
-      _inputs['QR raw data']!.text = qrRaw;
-      _applyQrDataToFields(qrRaw);
+      _applyQr(qrRaw);
 
       setState(() {
-        _fields = {
-          for (final entry in _inputs.entries) entry.key: entry.value.text,
-        };
+        _reviewing = true;
+        _scanningBack = false;
       });
     } catch (e) {
       if (!mounted) return;
@@ -375,49 +327,202 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
   }
 
-  void _applyQrDataToFields(String qrRaw) {
-    final nameMatch = RegExp(
-      r'የአሽከርካሪው\s*ስም\s*[:：-]*(.+?)(?=የመንጃ\s*ፍቃድ\s*ቁጥር|$)',
-      dotAll: true,
-    ).firstMatch(qrRaw);
+  void _applyQr(String qrRaw) {
+    _qrRaw = qrRaw;
 
-    if (nameMatch != null) {
-      final qrName = _clean(nameMatch.group(1)!);
-      if (qrName.isNotEmpty) {
-        _inputs['Full name']!.text = qrName;
-      }
+    final parsed = LicenseParser.parseQr(qrRaw);
+
+    if (parsed.fullName != null && parsed.fullName!.isNotEmpty) {
+      _fullNameController.text = parsed.fullName!;
+    }
+    if (parsed.licenseType != null && parsed.licenseType!.isNotEmpty) {
+      _licenseTypeController.text = parsed.licenseType!;
+    }
+    if (parsed.licenseId != null && parsed.licenseId!.isNotEmpty) {
+      _licenseIdController.text = parsed.licenseId!;
+    }
+  }
+
+  /// Sends the reviewed values to `POST /api/drivers`.
+  Future<void> _submitRegistration() async {
+    if (_submitting) return;
+
+    final licenseId = _licenseIdController.text.trim();
+    final fullName = _fullNameController.text.trim();
+
+    if (licenseId.isEmpty) {
+      _showMessage('A licence ID number is required.');
+      return;
+    }
+    if (fullName.isEmpty) {
+      _showMessage('The full name is required.');
+      return;
     }
 
-    final licenseMatch = RegExp(
-      r'የመንጃ\s*ፍቃድ\s*ቁጥር\s*[:：-]*(.+)$',
-      dotAll: true,
-    ).firstMatch(qrRaw);
+    final rawDob = _dobController.text.trim();
+    final rawExpiry = _expiryController.text.trim();
 
-    if (licenseMatch != null) {
-      final fullLicenseStr = licenseMatch.group(1)!.trim();
-      final parts = fullLicenseStr
-          .split('-')
-          .map((s) => _clean(s))
-          .where((s) => s.isNotEmpty)
-          .toList();
+    final dateOfBirth = LicenseParser.normalizeDate(rawDob);
+    final expiryDate = LicenseParser.normalizeDate(rawExpiry);
 
-      if (parts.length >= 3) {
-        final qrGrade = parts[1];
-        final qrLicenseId = parts.sublist(2).join('-');
+    if (rawDob.isNotEmpty && dateOfBirth == null) {
+      _showMessage(
+        'Date of birth "$rawDob" is not a valid date. Use DD/MM/YYYY.',
+      );
+      return;
+    }
+    if (rawExpiry.isNotEmpty && expiryDate == null) {
+      _showMessage(
+        'Expiry date "$rawExpiry" is not a valid date. Use DD/MM/YYYY.',
+      );
+      return;
+    }
 
-        if (qrGrade.isNotEmpty) {
-          _inputs['License type (Gerad)']!.text = qrGrade;
-        }
-        if (qrLicenseId.isNotEmpty) {
-          _inputs['License ID number']!.text = qrLicenseId;
-        }
-      } else if (parts.length == 2) {
-        _inputs['License type (Gerad)']!.text = parts[0];
-        _inputs['License ID number']!.text = parts[1];
-      } else if (parts.length == 1 && parts.first.isNotEmpty) {
-        _inputs['License ID number']!.text = parts.first;
+    setState(() => _submitting = true);
+
+    try {
+      final driver = await ApiService.registerDriver(
+        licenseId: licenseId,
+        fullName: fullName,
+        dateOfBirth: dateOfBirth,
+        licenseType: _licenseTypeController.text.trim().isEmpty
+            ? null
+            : _licenseTypeController.text.trim(),
+        expiryDate: expiryDate,
+        qrRawData: _qrRaw.isEmpty ? null : _qrRaw,
+        ocrRawText: _ocrRaw.isEmpty ? null : _ocrRaw,
+      );
+
+      if (!mounted) return;
+      await _showSuccess(driver);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+
+      if (e.isConflict) {
+        await _showDuplicate(e);
+      } else if (e.isUnauthorized) {
+        await _handleSessionExpired();
+      } else {
+        _showMessage(e.message);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage('Registration failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _submitting = false);
       }
     }
+  }
+
+  Future<void> _showSuccess(Driver driver) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon:
+            const Icon(Icons.check_circle, color: Color(0xFF1B7F4B), size: 40),
+        title: const Text('Licence registered'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(driver.fullName),
+            const SizedBox(height: 6),
+            Text('Licence ID: ${driver.licenseId}'),
+            const SizedBox(height: 10),
+            StatusChip(driver.status),
+          ],
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+    _resetForm();
+  }
+
+  Future<void> _showDuplicate(ApiException error) async {
+    final status = error.duplicateStatus ?? 'Unknown';
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon:
+            const Icon(Icons.info_outline, color: Color(0xFFB26A00), size: 40),
+        title: const Text('Licence already registered'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(error.message),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Text('Status: '),
+                StatusChip(status),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handleSessionExpired() async {
+    await _stopAutoQrScan();
+    await _camera?.dispose();
+    await AuthService.logout();
+
+    if (!mounted) return;
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      (route) => false,
+    );
+  }
+
+  Future<void> _resetForm() async {
+    _licenseIdController.clear();
+    _fullNameController.clear();
+    _dobController.clear();
+    _expiryController.clear();
+    _licenseTypeController.clear();
+    _qrRaw = '';
+    _ocrRaw = '';
+
+    // Release the previous controller before opening a fresh preview.
+    final old = _camera;
+    _camera = null;
+    if (old != null) {
+      try {
+        if (old.value.isStreamingImages) {
+          await old.stopImageStream();
+        }
+      } catch (_) {}
+      await old.dispose();
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _reviewing = false;
+      _scanningBack = false;
+      _initializing = true;
+      _error = null;
+    });
+
+    await _initializeCamera();
   }
 
   Map<String, String> _extractFields(String text) {
@@ -490,11 +595,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
 
     return {
-      'License ID number': _clean(licenseId),
-      'Full name': _clean(fullName),
-      'Date of birth': _clean(dob),
-      'Expiry date': _clean(expiry),
-      'License type (Gerad)': _clean(grade),
+      'License ID number': LicenseParser.clean(licenseId),
+      'Full name': LicenseParser.clean(fullName),
+      'Date of birth': LicenseParser.clean(dob),
+      'Expiry date': LicenseParser.clean(expiry),
+      'License type (Gerad)': LicenseParser.clean(grade),
     };
   }
 
@@ -519,8 +624,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
     processed = img.grayscale(processed);
     processed = img.contrast(processed, contrast: 130);
 
-    final croppedPath = '${path}_cropped.jpg';
-    final croppedFile = File(croppedPath);
+    final croppedFile = File('${path}_cropped.jpg');
     await croppedFile.writeAsBytes(img.encodeJpg(processed, quality: 90));
     return croppedFile;
   }
@@ -543,20 +647,13 @@ class _ScannerScreenState extends State<ScannerScreen> {
       height: cropHeight,
     );
 
-    final croppedPath = '${path}_qr_cropped.jpg';
-    final croppedFile = File(croppedPath);
+    final croppedFile = File('${path}_qr_cropped.jpg');
     await croppedFile.writeAsBytes(img.encodeJpg(cropped, quality: 90));
     return croppedFile;
   }
 
-  String _clean(String value) {
-    return value
-        .replaceAll(RegExp(r'^[\s:./|_~-]+|[\s:./|_~-]+$'), '')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-  }
-
   void _showMessage(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message)),
     );
@@ -567,48 +664,45 @@ class _ScannerScreenState extends State<ScannerScreen> {
     _stopAutoQrScan();
     _camera?.dispose();
     _barcodeScanner.close();
-    for (final controller in _inputs.values) {
-      controller.dispose();
-    }
+    _licenseIdController.dispose();
+    _fullNameController.dispose();
+    _dobController.dispose();
+    _expiryController.dispose();
+    _licenseTypeController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final camera = _camera;
-
     return Scaffold(
       appBar: AppBar(
         title: Text(
-          _fields != null
-              ? 'Review Extracted Info'
-              : _isScanningBack
-                  ? 'Step 2: Auto-Scanning QR...'
-                  : 'Driving License Scanner',
+          _reviewing
+              ? 'Review licence details'
+              : _scanningBack
+                  ? 'Step 2: scanning QR code'
+                  : 'Register licence',
         ),
-        actions: [
-          IconButton(
-            onPressed: _handleLogout,
-            tooltip: 'Logout',
-            icon: const Icon(Icons.logout),
-          ),
-        ],
       ),
       body: SafeArea(
-        child: _fields == null ? _buildCamera(camera) : _buildResults(),
+        child: _reviewing ? _buildReviewForm() : _buildCameraView(),
       ),
     );
   }
 
-  Widget _buildCamera(CameraController? camera) {
+  Widget _buildCameraView() {
+    final camera = _camera;
+
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.all(16),
           child: Text(
-            _isScanningBack
-                ? 'Point the camera at the QR code on the back — it will scan automatically.'
-                : 'Place the entire driving licence inside the frame.',
+            _scanningBack
+                ? 'Point the camera at the QR code on the back of the '
+                    'licence. It will be read automatically.'
+                : 'Place the front of the driving licence inside the frame '
+                    'and tap Scan.',
             textAlign: TextAlign.center,
           ),
         ),
@@ -621,18 +715,14 @@ class _ScannerScreenState extends State<ScannerScreen> {
               borderRadius: BorderRadius.circular(20),
             ),
             child: _initializing
-                ? const Center(
-                    child: CircularProgressIndicator(),
-                  )
+                ? const Center(child: CircularProgressIndicator())
                 : _error != null
                     ? Center(
                         child: Padding(
                           padding: const EdgeInsets.all(20),
                           child: Text(
                             _error!,
-                            style: const TextStyle(
-                              color: Colors.white,
-                            ),
+                            style: const TextStyle(color: Colors.white),
                           ),
                         ),
                       )
@@ -648,7 +738,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
                                   child: Container(
                                     decoration: BoxDecoration(
                                       border: Border.all(
-                                        color: _isScanningBack
+                                        color: _scanningBack
                                             ? Colors.amberAccent
                                             : Colors.greenAccent,
                                         width: 3,
@@ -670,7 +760,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
                                         ),
                                         const SizedBox(height: 16),
                                         Text(
-                                          _isScanningBack
+                                          _scanningBack
                                               ? 'Reading QR code...'
                                               : 'Reading licence...',
                                           style: const TextStyle(
@@ -704,22 +794,22 @@ class _ScannerScreenState extends State<ScannerScreen> {
                           camera == null ||
                           _error != null
                       ? null
-                      : (_isScanningBack ? _scanBackQrManual : _scanLicense),
+                      : (_scanningBack ? _captureQrManually : _scanFront),
                   icon: Icon(
-                    _isScanningBack
+                    _scanningBack
                         ? Icons.qr_code_scanner
                         : Icons.document_scanner,
                   ),
                   label: Text(
                     _scanning
                         ? 'Scanning...'
-                        : (_isScanningBack
-                            ? 'Auto-Scanning QR (Tap to Capture)'
+                        : (_scanningBack
+                            ? 'Capture QR manually'
                             : 'Scan licence'),
                   ),
                 ),
               ),
-              if (_isScanningBack) ...[
+              if (_scanningBack) ...[
                 const SizedBox(height: 8),
                 TextButton(
                   onPressed: _scanning
@@ -728,13 +818,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
                           await _stopAutoQrScan();
                           if (!mounted) return;
                           setState(() {
-                            _fields = {
-                              for (final entry in _inputs.entries)
-                                entry.key: entry.value.text,
-                            };
+                            _reviewing = true;
+                            _scanningBack = false;
                           });
                         },
-                  child: const Text('Skip QR Code'),
+                  child: const Text('Skip QR and review manually'),
                 ),
               ],
             ],
@@ -744,72 +832,158 @@ class _ScannerScreenState extends State<ScannerScreen> {
     );
   }
 
-  Widget _buildResults() {
+  Widget _buildReviewForm() {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
         const Icon(
           Icons.fact_check_outlined,
-          size: 48,
-          color: Colors.green,
+          size: 44,
+          color: Color(0xFF176B57),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Text(
-          'Review extracted information',
+          'Check the extracted information',
           style: Theme.of(context).textTheme.titleLarge,
           textAlign: TextAlign.center,
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 6),
         const Text(
-          'Check the values and correct any recognition errors.',
+          'Correct any recognition errors before registering the licence.',
           textAlign: TextAlign.center,
         ),
-        const SizedBox(height: 24),
-        for (final entry in _inputs.entries) ...[
-          TextField(
-            controller: entry.value,
-            maxLines: entry.key == 'OCR raw text'
-                ? 5
-                : entry.key == 'QR raw data'
-                    ? 3
-                    : 1,
-            decoration: InputDecoration(
-              labelText: entry.key,
-              alignLabelWithHint: true,
-              border: const OutlineInputBorder(),
-            ),
+        const SizedBox(height: 22),
+        TextField(
+          controller: _licenseIdController,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            labelText: 'Licence ID number *',
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.badge_outlined),
           ),
-          const SizedBox(height: 16),
-        ],
-        FilledButton.icon(
-          onPressed: () {
-            final values = {
-              for (final entry in _inputs.entries)
-                entry.key: entry.value.text.trim(),
-            };
-
-            _showMessage('Information reviewed locally.');
-            debugPrint('Reviewed fields: $values');
-          },
-          icon: const Icon(Icons.check),
-          label: const Text('Confirm information'),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _fullNameController,
+          textCapitalization: TextCapitalization.words,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            labelText: 'Full name *',
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.person_outline),
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _dobController,
+          keyboardType: TextInputType.datetime,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            labelText: 'Date of birth',
+            hintText: 'DD/MM/YYYY',
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.cake_outlined),
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _expiryController,
+          keyboardType: TextInputType.datetime,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            labelText: 'Expiry date',
+            hintText: 'DD/MM/YYYY',
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.event_outlined),
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _licenseTypeController,
+          decoration: const InputDecoration(
+            labelText: 'Licence type (Gerad)',
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.drive_eta_outlined),
+          ),
+        ),
+        if (_qrRaw.isNotEmpty || _ocrRaw.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          ExpansionTile(
+            title: const Text('Raw scan data'),
+            tilePadding: EdgeInsets.zero,
+            childrenPadding: const EdgeInsets.only(bottom: 8),
+            children: [
+              if (_qrRaw.isNotEmpty) _RawBlock(label: 'QR data', value: _qrRaw),
+              if (_ocrRaw.isNotEmpty)
+                _RawBlock(label: 'OCR text', value: _ocrRaw),
+            ],
+          ),
+        ],
+        const SizedBox(height: 20),
+        SizedBox(
+          height: 52,
+          child: FilledButton.icon(
+            onPressed: _submitting ? null : _submitRegistration,
+            icon: _submitting
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.save_outlined),
+            label: Text(_submitting ? 'Registering...' : 'Register licence'),
+          ),
+        ),
+        const SizedBox(height: 10),
         OutlinedButton(
-          onPressed: () async {
-            await _stopAutoQrScan();
-            for (final controller in _inputs.values) {
-              controller.clear();
-            }
-            if (!mounted) return;
-            setState(() {
-              _fields = null;
-              _isScanningBack = false;
-            });
-          },
-          child: const Text('Scan another licence'),
+          onPressed: _submitting
+              ? null
+              : () async {
+                  await _stopAutoQrScan();
+                  _resetForm();
+                },
+          child: const Text('Cancel and rescan'),
         ),
       ],
+    );
+  }
+}
+
+class _RawBlock extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _RawBlock({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: Theme.of(context).textTheme.labelMedium),
+          const SizedBox(height: 4),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Theme.of(context)
+                  .colorScheme
+                  .surfaceContainerHighest
+                  .withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: SelectableText(
+              value,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

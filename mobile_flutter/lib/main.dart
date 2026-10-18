@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+
+import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
-import 'screens/scanner_screen.dart';
 import 'services/auth_service.dart';
 
 Future<void> main() async {
@@ -20,15 +21,18 @@ class LicenseScannerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'License Scanner',
+      title: 'DAFTech Driver Licence',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF176B57),
         ),
         useMaterial3: true,
+        inputDecorationTheme: const InputDecorationTheme(
+          border: OutlineInputBorder(),
+        ),
       ),
-      home: initialLoggedIn ? const ScannerScreen() : const LoginScreen(),
+      home: initialLoggedIn ? const HomeScreen() : const LoginScreen(),
     );
   }
 }

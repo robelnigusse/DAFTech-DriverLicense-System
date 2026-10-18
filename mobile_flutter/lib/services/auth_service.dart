@@ -2,8 +2,10 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'api_config.dart';
+
 class AuthService {
-  static const String _baseUrl = 'http://192.168.8.118:5000/api/auth';
+  static const String _baseUrl = '$apiBaseUrl/auth';
   static const String _tokenKey = 'access_token';
   static const String _tokenTypeKey = 'token_type';
   static const String _expiryKey = 'token_expiry';
