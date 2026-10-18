@@ -1,3 +1,4 @@
+
 namespace backend_dotnet.Models.Enums;
 
 public enum VerificationStatus

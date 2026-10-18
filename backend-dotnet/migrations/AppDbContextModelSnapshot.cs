@@ -193,6 +193,8 @@ namespace backend_dotnet.Migrations
 
                     b.HasKey("DriverId");
 
+                    b.HasAlternateKey("LicenseId");
+
                     b.HasIndex("RegisteredBy");
 
                     b.ToTable("Drivers");
@@ -282,6 +284,9 @@ namespace backend_dotnet.Migrations
                     b.Property<DateTime>("CheckedDate")
                         .HasColumnType("datetime2");
 
+                    b.Property<Guid?>("DriverId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("LicenseId")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -294,7 +299,7 @@ namespace backend_dotnet.Migrations
 
                     b.HasIndex("CheckedBy");
 
-                    b.HasIndex("LicenseId");
+                    b.HasIndex("DriverId");
 
                     b.ToTable("VerificationLogs");
                 });
@@ -371,10 +376,8 @@ namespace backend_dotnet.Migrations
 
                     b.HasOne("backend_dotnet.Models.Driver", "Driver")
                         .WithMany("VerificationLogs")
-                        .HasForeignKey("LicenseId")
-                        .HasPrincipalKey("LicenseId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
+                        .HasForeignKey("DriverId")
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("CheckedByUser");
 

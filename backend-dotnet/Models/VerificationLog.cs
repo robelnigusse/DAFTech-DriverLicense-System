@@ -1,3 +1,4 @@
+
 using System.ComponentModel.DataAnnotations;
 using backend_dotnet.Models.Enums;
 
@@ -14,11 +15,13 @@ public class VerificationLog
 
     public VerificationStatus VerificationStatus { get; set; }
 
+    public Guid? DriverId { get; set; }
+
+    public Driver? Driver { get; set; }
+
     public Guid CheckedBy { get; set; }
 
     public User CheckedByUser { get; set; } = null!;
 
     public DateTime CheckedDate { get; set; } = DateTime.UtcNow;
-
-    public Driver Driver { get; set; } = null!;
 }
