@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using backend_dotnet.Services;
 using Microsoft.OpenApi;
+using backend_dotnet.Repositories;
 
 
 var builder = WebApplication.CreateBuilder(args);
@@ -69,7 +70,12 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     )
 );
 
-
+builder.Services.AddScoped<JwtService>();
+builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<VerificationRepository>();
+builder.Services.AddScoped<VerificationService>();
+builder.Services.AddScoped<DriverRepository>();
+builder.Services.AddScoped<DriverService>();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 

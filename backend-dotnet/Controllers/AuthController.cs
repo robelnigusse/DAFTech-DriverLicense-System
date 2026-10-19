@@ -1,7 +1,6 @@
+
 using backend_dotnet.DTOs;
-using backend_dotnet.Models;
 using backend_dotnet.Services;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 
 namespace backend_dotnet.Controllers;
@@ -10,50 +9,32 @@ namespace backend_dotnet.Controllers;
 [Route("api/[controller]")]
 public class AuthController : ControllerBase
 {
-    private readonly UserManager<User> _userManager;
-    private readonly JwtService _jwtService;
+    private readonly AuthService _authService;
 
-    public AuthController(
-        UserManager<User> userManager,
-        JwtService jwtService)
+    public AuthController(AuthService authService)
     {
-        _userManager = userManager;
-        _jwtService = jwtService;
+        _authService = authService;
     }
 
     [HttpPost("login")]
-    public async Task<IActionResult> Login(LoginRequestDto request)
+    public async Task<IActionResult> Login(
+        [FromBody] LoginRequestDto request)
     {
-        System.Console.WriteLine($"Login attempt for user: {request.Username}");
-        var user = await _userManager.FindByNameAsync(request.Username);
+        var result = await _authService.LoginAsync(request);
 
-        if (user is null)
+        if (result is null)
         {
             return Unauthorized(new
             {
                 message = "Invalid username or password."
             });
         }
-
-        var passwordValid = await _userManager.CheckPasswordAsync(
-            user, request.Password);
-
-        if (!passwordValid)
-        {
-            return Unauthorized(new
-            {
-                message = "Invalid username or password."
-            });
-        }
-
-        var token = await _jwtService.GenerateTokenAsync(user);
 
         return Ok(new
         {
-            accessToken = token,
+            accessToken = result.Value.Token,
             tokenType = "Bearer",
-            expiresInMinutes = 60
+            expiresInMinutes = result.Value.ExpiresInMinutes
         });
     }
 }
-// dotnet watch --urls "http://0.0.0.0:5000"

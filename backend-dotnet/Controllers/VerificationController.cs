@@ -1,13 +1,9 @@
-using backend_dotnet.Models.Enums;
 
 using System.Security.Claims;
-using backend_dotnet.Data;
 using backend_dotnet.DTOs;
-using backend_dotnet.Models;
-// using backend_dotnet.Models.Enums;
+using backend_dotnet.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 
 namespace backend_dotnet.Controllers;
 
@@ -16,18 +12,18 @@ namespace backend_dotnet.Controllers;
 [Authorize]
 public class VerificationController : ControllerBase
 {
-    private readonly AppDbContext _context;
+    private readonly VerificationService _verificationService;
 
-    public VerificationController(AppDbContext context)
+    public VerificationController(
+        VerificationService verificationService)
     {
-        _context = context;
+        _verificationService = verificationService;
     }
 
     [HttpPost("verify")]
-    public async Task<ActionResult<LicenseVerificationResponseDto>> VerifyLicense(
-        [FromBody] VerifyLicenseDto request)
+    public async Task<ActionResult<LicenseVerificationResponseDto>>
+        VerifyLicense([FromBody] VerifyLicenseDto request)
     {
-        // Get the authenticated user's ID from the JWT token.
         var userIdValue =
             User.FindFirstValue(ClaimTypes.NameIdentifier)
             ?? User.FindFirstValue("sub");
@@ -40,9 +36,7 @@ public class VerificationController : ControllerBase
             });
         }
 
-        var licenseId = request.LicenseId.Trim();
-
-        if (string.IsNullOrWhiteSpace(licenseId))
+        if (string.IsNullOrWhiteSpace(request.LicenseId))
         {
             return BadRequest(new
             {
@@ -50,70 +44,10 @@ public class VerificationController : ControllerBase
             });
         }
 
-        // Find a registered license.
-        var driver = await _context.Drivers
-            .FirstOrDefaultAsync(d => d.LicenseId == licenseId);
+        var result = await _verificationService.VerifyAsync(
+            request,
+            checkedBy);
 
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
-
-        string status;
-        string expiryStatus;
-        VerificationStatus verificationStatus;
-
-        if (driver is null)
-        {
-            // No registered license matches the submitted ID.
-            status = "Fake";
-            expiryStatus = "Unknown";
-            verificationStatus = VerificationStatus.NotFound;
-        }
-        else if (!driver.ExpiryDate.HasValue)
-        {
-            // A license exists, but its expiry date cannot be checked.
-            status = "Real";
-            expiryStatus = "NeedsReview";
-            verificationStatus = VerificationStatus.NeedsReview;
-        }
-        else if (driver.ExpiryDate.Value < today)
-        {
-            // The license is registered but has expired.
-            status = "Real";
-            expiryStatus = "Expired";
-            verificationStatus = VerificationStatus.Expired;
-        }
-        else
-        {
-            // The license is registered and has not expired.
-            status = "Real";
-            expiryStatus = "Active";
-            verificationStatus = VerificationStatus.Verified;
-        }
-
-        var checkedDate = DateTime.UtcNow;
-
-        // Save every attempt, including unknown license IDs.
-        var log = new VerificationLog
-        {
-            LicenseId = licenseId,
-            DriverId = driver?.DriverId,
-            VerificationStatus = verificationStatus,
-            CheckedBy = checkedBy,
-            CheckedDate = checkedDate
-        };
-
-        _context.VerificationLogs.Add(log);
-        await _context.SaveChangesAsync();
-
-        var response = new LicenseVerificationResponseDto
-        {
-            LicenseId = licenseId,
-            FullName = driver?.FullName,
-            Status = status,
-            ExpiryStatus = expiryStatus,
-            CheckedBy = checkedBy,
-            CheckedDate = checkedDate
-        };
-
-        return Ok(response);
+        return Ok(result);
     }
 }
